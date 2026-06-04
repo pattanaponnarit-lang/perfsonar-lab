@@ -7,6 +7,7 @@ import ssl
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 app = Flask(__name__)
@@ -55,6 +56,10 @@ except json.JSONDecodeError:
 
 def resolve_host(node_name):
     return HOST_MAP.get(node_name, node_name)
+
+
+def pscheduler_api_host():
+    return urllib.parse.urlparse(PSCHEDULER_API_URL).hostname
 
 
 def http_json(url, method='GET', payload=None):
@@ -142,7 +147,7 @@ def iperf3_command(source_host, destination_host):
     iperf3_args = ["iperf3", "-J", "-c", destination_host, "-t", duration_seconds]
     runner_host = IPERF3_RUNNER_HOST or source_host
 
-    if runner_host in ["localhost", "127.0.0.1", "::1"]:
+    if runner_host in ["localhost", "127.0.0.1", "::1", pscheduler_api_host()]:
         return iperf3_args
 
     ssh_target = f"{IPERF3_RUNNER_USER}@{runner_host}" if IPERF3_RUNNER_USER else runner_host
