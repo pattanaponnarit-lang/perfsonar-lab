@@ -497,7 +497,7 @@ def health():
     })
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5001))
+    port = int(os.environ.get('PORT', 5013))
     print(f"🚀 Starting perfSONAR API on http://localhost:{port}")
     print(f"Swagger UI: http://localhost:{port}/docs")
     print(f"Test URL: http://localhost:{port}/api/metrics?source={DEFAULT_NODES[0]}&destination={DEFAULT_NODES[1]}&metric=throughput")
