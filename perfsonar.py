@@ -27,7 +27,7 @@ swagger_ui_blueprint = get_swaggerui_blueprint(
 app.register_blueprint(swagger_ui_blueprint, url_prefix=SWAGGER_URL)
 
 # รายชื่อโหนดเริ่มต้นสำหรับทดสอบกับ perfSONAR/pScheduler จริง
-DEFAULT_NODES = ['iperf3.narit.or.th', '192.168.200.222', '203.185.67.32', '203.158.145.146']
+DEFAULT_NODES = ['iperf3.narit.or.th', '192.168.16.92', '192.168.200.222']
 NODES = [
     node.strip()
     for node in os.environ.get('PERFSONAR_NODES', ','.join(DEFAULT_NODES)).split(',')
@@ -107,6 +107,13 @@ def parse_iso_duration_seconds(value):
         return float(value[2:-1])
     except ValueError:
         return None
+
+
+def parse_iso_duration_milliseconds(value):
+    seconds = parse_iso_duration_seconds(value)
+    if seconds is None:
+        return None
+    return round(seconds * 1000, 3)
 
 
 def iso_duration_to_int_seconds(value, default=10):
@@ -256,6 +263,74 @@ def find_numeric_value(payload, metric_type):
             return round(float(value), 2)
 
     return None
+
+
+def first_present(payload, keys):
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        if key in payload and payload[key] is not None:
+            return payload[key]
+    return None
+
+
+def duration_field_milliseconds(payload, keys):
+    value = first_present(payload, keys)
+    milliseconds = parse_iso_duration_milliseconds(value)
+    if milliseconds is not None:
+        return milliseconds
+    if isinstance(value, (int, float)):
+        return round(float(value), 3)
+    return None
+
+
+def compact_pscheduler_run(raw_result, task_url):
+    return {
+        "task_url": task_url,
+        "run_url": f"{task_url}/runs/first",
+        "state": raw_result.get("state"),
+        "state_display": raw_result.get("state-display"),
+        "start_time": raw_result.get("start-time") or raw_result.get("start"),
+        "end_time": raw_result.get("end-time") or raw_result.get("end"),
+        "duration": raw_result.get("duration"),
+        "errors": raw_result.get("errors"),
+        "participant": raw_result.get("participant"),
+        "participants": raw_result.get("participants"),
+        "tool": raw_result.get("tool")
+    }
+
+
+def rtt_measurement_details(raw_result, metric_type):
+    merged_result = raw_result.get("result-merged", {}) if isinstance(raw_result, dict) else {}
+    result_full = raw_result.get("result-full") if isinstance(raw_result, dict) else None
+    loss = first_present(merged_result, ["loss", "loss-percent", "loss_percent", "lost_percent"])
+
+    details = {
+        "test_type": "rtt",
+        "unit": "ms" if metric_type == "latency" else "percent",
+        "loss_percent": round(float(loss), 3) if isinstance(loss, (int, float)) else None,
+        "latency_ms": {
+            "mean": duration_field_milliseconds(merged_result, ["mean", "average", "avg"]),
+            "minimum": duration_field_milliseconds(merged_result, ["minimum", "min"]),
+            "maximum": duration_field_milliseconds(merged_result, ["maximum", "max"]),
+            "median": duration_field_milliseconds(merged_result, ["median"]),
+            "standard_deviation": duration_field_milliseconds(merged_result, ["stddev", "standard-deviation"])
+        },
+        "ttl": first_present(merged_result, ["ttl", "hops"]),
+        "sent": first_present(merged_result, ["sent", "packets-sent", "packets_sent"]),
+        "received": first_present(merged_result, ["received", "packets-received", "packets_received"]),
+        "lost": first_present(merged_result, ["lost", "packets-lost", "packets_lost"]),
+        "succeeded": first_present(merged_result, ["succeeded", "success"]),
+        "failed": first_present(merged_result, ["failed"]),
+        "diagnostics": first_present(merged_result, ["diags", "diagnostics"]),
+        "errors": first_present(merged_result, ["errors"]),
+        "raw_result_merged": merged_result
+    }
+
+    if result_full is not None:
+        details["raw_result_full"] = result_full
+
+    return details
 
 
 def iperf3_command(source_host, destination_host, duration_seconds):
@@ -408,14 +483,19 @@ def get_real_metric(source, destination, metric_type, throughput_duration_second
         raise RuntimeError("Could not find a numeric metric value in pScheduler result.")
 
     timestamp = int(time.time())
+    pscheduler_details = compact_pscheduler_run(raw_result, task_url)
+    measurement_details = rtt_measurement_details(raw_result, metric_type)
     return [{
         "timestamp": timestamp,
         "time_label": time.strftime('%H:%M', time.localtime(timestamp)),
         "value": metric_value,
+        "unit": "ms" if metric_type == "latency" else "percent",
         "source_host": resolve_host(source),
         "destination_host": destination_host,
         "task_url": task_url,
-        "runner_url": PSCHEDULER_API_URL
+        "runner_url": PSCHEDULER_API_URL,
+        "pscheduler": pscheduler_details,
+        "measurement": measurement_details
     }]
 
 @app.route('/swagger.json', methods=['GET'])
@@ -527,6 +607,18 @@ def swagger_json():
                             "type": "number",
                             "format": "float",
                             "example": 8.42
+                        },
+                        "unit": {
+                            "type": "string",
+                            "example": "ms"
+                        },
+                        "pscheduler": {
+                            "type": "object",
+                            "description": "ข้อมูลสถานะ run จาก pScheduler เช่น task URL, run URL, state, time, errors และ participants"
+                        },
+                        "measurement": {
+                            "type": "object",
+                            "description": "รายละเอียดผลวัดที่ parse ได้จาก result-merged/result-full ของ pScheduler"
                         }
                     }
                 },
