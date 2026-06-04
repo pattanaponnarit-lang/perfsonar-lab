@@ -27,7 +27,7 @@ swagger_ui_blueprint = get_swaggerui_blueprint(
 app.register_blueprint(swagger_ui_blueprint, url_prefix=SWAGGER_URL)
 
 # รายชื่อโหนดเริ่มต้นสำหรับทดสอบกับ perfSONAR/pScheduler จริง
-DEFAULT_NODES = ['192.168.200.222', 'iperf3.narit.or.th']
+DEFAULT_NODES = ['iperf3.narit.or.th', '192.168.200.222', '203.185.67.32']
 NODES = [
     node.strip()
     for node in os.environ.get('PERFSONAR_NODES', ','.join(DEFAULT_NODES)).split(',')
@@ -41,6 +41,7 @@ PSCHEDULER_API_URL = os.environ.get(
 ).rstrip('/')
 PSCHEDULER_VERIFY_TLS = os.environ.get('PSCHEDULER_VERIFY_TLS', 'false').strip().lower() == 'true'
 THROUGHPUT_DURATION = os.environ.get('PERFSONAR_THROUGHPUT_DURATION', 'PT5S')
+THROUGHPUT_MAX_SECONDS = int(os.environ.get('PERFSONAR_THROUGHPUT_MAX_SECONDS', '10'))
 THROUGHPUT_TOOL = os.environ.get('PERFSONAR_THROUGHPUT_TOOL', 'iperf3').strip()
 THROUGHPUT_MODE = os.environ.get('PERFSONAR_THROUGHPUT_MODE', 'iperf3_ssh').strip().lower()
 IPERF3_RUNNER_HOST = os.environ.get('IPERF3_RUNNER_HOST', '').strip()
@@ -115,6 +116,121 @@ def iso_duration_to_int_seconds(value, default=10):
     return max(1, int(round(parsed)))
 
 
+def parse_throughput_duration(value):
+    if value is None or str(value).strip() == "":
+        return iso_duration_to_int_seconds(THROUGHPUT_DURATION, default=5)
+
+    raw_value = str(value).strip()
+    if raw_value.upper().startswith('PT'):
+        seconds = iso_duration_to_int_seconds(raw_value, default=0)
+    else:
+        try:
+            seconds = int(round(float(raw_value)))
+        except ValueError as error:
+            raise ValueError("duration must be a number of seconds or an ISO duration like PT10S") from error
+
+    if seconds < 1:
+        raise ValueError("duration must be at least 1 second")
+    if seconds > THROUGHPUT_MAX_SECONDS:
+        raise ValueError(f"duration must be {THROUGHPUT_MAX_SECONDS} seconds or less")
+    return seconds
+
+
+def human_bytes(num_bytes):
+    units = ["Bytes", "KBytes", "MBytes", "GBytes", "TBytes"]
+    value = float(num_bytes or 0)
+    for unit in units:
+        if abs(value) < 1024 or unit == units[-1]:
+            if unit == "Bytes":
+                return f"{value:.0f} {unit}"
+            return f"{value:.2f} {unit}"
+        value /= 1024
+
+
+def human_bitrate(bits_per_second):
+    units = ["bits/sec", "Kbits/sec", "Mbits/sec", "Gbits/sec", "Tbits/sec"]
+    value = float(bits_per_second or 0)
+    for unit in units:
+        if abs(value) < 1000 or unit == units[-1]:
+            return f"{value:.2f} {unit}"
+        value /= 1000
+
+
+def iperf3_summary(summary):
+    if not isinstance(summary, dict):
+        summary = {}
+    return {
+        "seconds": round(float(summary.get("seconds") or 0), 2),
+        "bytes": summary.get("bytes"),
+        "transfer": human_bytes(summary.get("bytes")),
+        "bits_per_second": summary.get("bits_per_second"),
+        "bitrate": human_bitrate(summary.get("bits_per_second")),
+        "retransmits": summary.get("retransmits")
+    }
+
+
+def iperf3_intervals(raw_result):
+    intervals = []
+    for interval in raw_result.get("intervals", []):
+        summary = interval.get("sum", {})
+        intervals.append({
+            "start": round(float(summary.get("start") or 0), 2),
+            "end": round(float(summary.get("end") or 0), 2),
+            "seconds": round(float(summary.get("seconds") or 0), 2),
+            "bytes": summary.get("bytes"),
+            "transfer": human_bytes(summary.get("bytes")),
+            "bits_per_second": summary.get("bits_per_second"),
+            "bitrate": human_bitrate(summary.get("bits_per_second")),
+            "retransmits": summary.get("retransmits"),
+            "cwnd": human_bytes(summary.get("snd_cwnd")) if summary.get("snd_cwnd") is not None else None
+        })
+    return intervals
+
+
+def iperf3_text_output(raw_result, destination_host):
+    start = raw_result.get("start", {})
+    connection = (start.get("connected") or [{}])[0]
+    end = raw_result.get("end", {})
+    sender = iperf3_summary(end.get("sum_sent"))
+    receiver = iperf3_summary(end.get("sum_received"))
+    intervals = iperf3_intervals(raw_result)
+    local_host = connection.get("local_host", "local")
+    local_port = connection.get("local_port", "")
+    remote_host = connection.get("remote_host", destination_host)
+    remote_port = connection.get("remote_port", 5201)
+
+    lines = [
+        f"Connecting to host {destination_host}, port {remote_port}",
+        f"[  5] local {local_host} port {local_port} connected to {remote_host} port {remote_port}",
+        "[ ID] Interval           Transfer     Bitrate         Retr  Cwnd",
+    ]
+
+    for interval in intervals:
+        retr = interval["retransmits"] if interval["retransmits"] is not None else ""
+        cwnd = interval["cwnd"] or ""
+        lines.append(
+            f"[  5]   {interval['start']:.2f}-{interval['end']:.2f} sec  "
+            f"{interval['transfer']:>11}  {interval['bitrate']:>14}  {retr:>4}  {cwnd}"
+        )
+
+    lines.extend([
+        "- - - - - - - - - - - - - - - - - - - - - - - - -",
+        "[ ID] Interval           Transfer     Bitrate         Retr",
+        (
+            f"[  5]   0.00-{sender['seconds']:.2f} sec  "
+            f"{sender['transfer']:>11}  {sender['bitrate']:>14}  "
+            f"{sender['retransmits'] if sender['retransmits'] is not None else '':>4}            sender"
+        ),
+        (
+            f"[  5]   0.00-{receiver['seconds']:.2f} sec  "
+            f"{receiver['transfer']:>11}  {receiver['bitrate']:>14}                  receiver"
+        ),
+        "",
+        "iperf Done."
+    ])
+    return "\n".join(lines)
+
+
 def find_numeric_value(payload, metric_type):
     merged_result = payload.get("result-merged", {}) if isinstance(payload, dict) else {}
 
@@ -142,8 +258,8 @@ def find_numeric_value(payload, metric_type):
     return None
 
 
-def iperf3_command(source_host, destination_host):
-    duration_seconds = str(iso_duration_to_int_seconds(THROUGHPUT_DURATION))
+def iperf3_command(source_host, destination_host, duration_seconds):
+    duration_seconds = str(duration_seconds)
     iperf3_args = ["iperf3", "-J", "-c", destination_host, "-t", duration_seconds]
     runner_host = IPERF3_RUNNER_HOST or source_host
 
@@ -169,11 +285,11 @@ def iperf3_command(source_host, destination_host):
     return command
 
 
-def get_iperf3_metric(source, destination):
+def get_iperf3_metric(source, destination, duration_seconds):
     source_host = resolve_host(source)
     destination_host = resolve_host(destination)
     completed = subprocess.run(
-        iperf3_command(source_host, destination_host),
+        iperf3_command(source_host, destination_host, duration_seconds),
         capture_output=True,
         text=True,
         timeout=PERFSONAR_TIMEOUT,
@@ -203,7 +319,13 @@ def get_iperf3_metric(source, destination):
         "source_host": source_host,
         "destination_host": destination_host,
         "runner": IPERF3_RUNNER_HOST or source_host,
-        "tool": "iperf3"
+        "tool": "iperf3",
+        "duration_seconds": duration_seconds,
+        "command": f"iperf3 -c {destination_host} -t {duration_seconds}",
+        "sender": iperf3_summary(end_result.get("sum_sent")),
+        "receiver": iperf3_summary(end_result.get("sum_received")),
+        "intervals": iperf3_intervals(raw_result),
+        "iperf3_text": iperf3_text_output(raw_result, destination_host)
     }]
 
 
@@ -272,9 +394,10 @@ def wait_for_first_run(task_url):
     raise RuntimeError("Timed out waiting for pScheduler run to finish.")
 
 
-def get_real_metric(source, destination, metric_type):
+def get_real_metric(source, destination, metric_type, throughput_duration_seconds=None):
     if metric_type == "throughput" and THROUGHPUT_MODE == "iperf3_ssh":
-        return get_iperf3_metric(source, destination)
+        duration_seconds = throughput_duration_seconds or parse_throughput_duration(None)
+        return get_iperf3_metric(source, destination, duration_seconds)
 
     destination_host = resolve_host(destination)
     task_url = create_pscheduler_task(metric_type, destination_host)
@@ -347,6 +470,18 @@ def swagger_json():
                                 "type": "string",
                                 "default": "throughput",
                                 "enum": METRIC_TYPES
+                            }
+                        },
+                        {
+                            "name": "duration",
+                            "in": "query",
+                            "description": "จำนวนวินาทีสำหรับ throughput เท่านั้น เช่น 10 จะเท่ากับ iperf3 -t 10",
+                            "required": False,
+                            "schema": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": THROUGHPUT_MAX_SECONDS,
+                                "default": iso_duration_to_int_seconds(THROUGHPUT_DURATION, default=5)
                             }
                         }
                     ],
@@ -441,6 +576,7 @@ def get_metrics():
     source = request.args.get('source', DEFAULT_NODES[0])
     destination = request.args.get('destination', DEFAULT_NODES[1])
     metric_type = request.args.get('metric', 'throughput')
+    duration = request.args.get('duration')
 
     if metric_type not in METRIC_TYPES:
         return jsonify({"error": "Invalid metric type"}), 400
@@ -450,7 +586,10 @@ def get_metrics():
         return jsonify({"error": "Source and Destination cannot be the same"}), 400
 
     try:
-        history_data = get_real_metric(source, destination, metric_type)
+        throughput_duration_seconds = None
+        if metric_type == "throughput":
+            throughput_duration_seconds = parse_throughput_duration(duration)
+        history_data = get_real_metric(source, destination, metric_type, throughput_duration_seconds)
     except (RuntimeError, TimeoutError, ValueError) as error:
         return jsonify({
             "error": str(error),
