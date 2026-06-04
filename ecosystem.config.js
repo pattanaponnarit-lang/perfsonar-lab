@@ -12,7 +12,7 @@ module.exports = {
         PORT: "5013",
         PSCHEDULER_API_URL: "https://192.168.200.222/pscheduler",
         PSCHEDULER_VERIFY_TLS: "false",
-        PERFSONAR_NODES: "192.168.16.92:5013,192.168.200.222,iperf3.narit.or.th,ps0002.m45.ihep.su",
+        PERFSONAR_NODES: "192.168.16.92,192.168.200.222,iperf3.narit.or.th,ps0002.m45.ihep.su,nrm-perfsonar.uni.net.th,perfsonar1c.hkix.net",
         PERFSONAR_TIMEOUT: "90",
         PERFSONAR_THROUGHPUT_DURATION: "PT5S",
         PERFSONAR_THROUGHPUT_MODE: "iperf3_ssh",
