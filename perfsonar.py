@@ -27,7 +27,7 @@ swagger_ui_blueprint = get_swaggerui_blueprint(
 app.register_blueprint(swagger_ui_blueprint, url_prefix=SWAGGER_URL)
 
 # รายชื่อโหนดเริ่มต้นสำหรับทดสอบกับ perfSONAR/pScheduler จริง
-DEFAULT_NODES = ['iperf3.narit.or.th', '192.168.200.222', '203.185.67.32']
+DEFAULT_NODES = ['iperf3.narit.or.th', '192.168.200.222', '203.185.67.32', '203.158.145.146']
 NODES = [
     node.strip()
     for node in os.environ.get('PERFSONAR_NODES', ','.join(DEFAULT_NODES)).split(',')
